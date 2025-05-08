@@ -31,7 +31,6 @@ import {
   isArrayType,
   isMapType,
   isMutableEffect,
-  isObjectType,
   isSetType,
 } from '../HIR/HIR';
 import {FunctionSignature} from '../HIR/ObjectShape';
@@ -521,7 +520,7 @@ class InferenceState {
          *   `expected valueKind to be 'Mutable' but found to be \`${valueKind}\``
          * );
          */
-        effect = isObjectType(place.identifier) ? Effect.Store : Effect.Mutate;
+        effect = Effect.Store;
         break;
       }
       case Effect.Capture: {
@@ -670,11 +669,7 @@ class InferenceState {
     for (const [value, kind] of this.#values) {
       const id = identify(value);
       result.values[id] = {
-        abstract: {
-          kind: kind.kind,
-          context: [...kind.context].map(printPlace),
-          reason: [...kind.reason],
-        },
+        abstract: this.debugAbstractValue(kind),
         value: printInstructionValue(value),
       };
     }
@@ -682,6 +677,14 @@ class InferenceState {
       result.variables[`$${variable}`] = [...values].map(identify);
     }
     return result;
+  }
+
+  debugAbstractValue(value: AbstractValue): any {
+    return {
+      kind: value.kind,
+      context: [...value.context].map(printPlace),
+      reason: [...value.reason],
+    };
   }
 
   inferPhi(phi: Phi): void {
@@ -909,19 +912,11 @@ function inferBlock(
         break;
       }
       case 'ArrayExpression': {
-        const contextRefOperands = getContextRefOperand(state, instrValue);
-        const valueKind: AbstractValue =
-          contextRefOperands.length > 0
-            ? {
-                kind: ValueKind.Context,
-                reason: new Set([ValueReason.Other]),
-                context: new Set(contextRefOperands),
-              }
-            : {
-                kind: ValueKind.Mutable,
-                reason: new Set([ValueReason.Other]),
-                context: new Set(),
-              };
+        const valueKind: AbstractValue = {
+          kind: ValueKind.Mutable,
+          reason: new Set([ValueReason.Other]),
+          context: new Set(),
+        };
 
         for (const element of instrValue.elements) {
           if (element.kind === 'Spread') {
@@ -942,6 +937,7 @@ function inferBlock(
             let _: 'Hole' = element.kind;
           }
         }
+
         state.initialize(instrValue, valueKind);
         state.define(instr.lvalue, instrValue);
         instr.lvalue.effect = Effect.Store;
@@ -961,19 +957,11 @@ function inferBlock(
         break;
       }
       case 'ObjectExpression': {
-        const contextRefOperands = getContextRefOperand(state, instrValue);
-        const valueKind: AbstractValue =
-          contextRefOperands.length > 0
-            ? {
-                kind: ValueKind.Context,
-                reason: new Set([ValueReason.Other]),
-                context: new Set(contextRefOperands),
-              }
-            : {
-                kind: ValueKind.Mutable,
-                reason: new Set([ValueReason.Other]),
-                context: new Set(),
-              };
+        const valueKind: AbstractValue = {
+          kind: ValueKind.Mutable,
+          reason: new Set([ValueReason.Other]),
+          context: new Set(),
+        };
 
         for (const property of instrValue.properties) {
           switch (property.kind) {
@@ -1300,7 +1288,9 @@ function inferBlock(
         state.referenceAndRecordEffects(
           freezeActions,
           instrValue.object,
-          Effect.Store,
+          typeof instrValue.property === 'string'
+            ? Effect.Store
+            : Effect.Mutate,
           ValueReason.Other,
         );
 
@@ -1818,7 +1808,9 @@ function inferBlock(
         state.isDefined(operand) &&
         ((operand.identifier.type.kind === 'Function' &&
           state.isFunctionExpression) ||
-          state.kind(operand).kind === ValueKind.Context)
+          state.kind(operand).kind === ValueKind.Context ||
+          (state.kind(operand).kind === ValueKind.Mutable &&
+            state.isFunctionExpression))
       ) {
         /**
          * Returned values should only be typed as 'frozen' if they are both (1)
@@ -1843,22 +1835,6 @@ function inferBlock(
   terminalFreezeActions.forEach(({values, reason}) =>
     state.freezeValues(values, reason),
   );
-}
-
-function getContextRefOperand(
-  state: InferenceState,
-  instrValue: InstructionValue,
-): Array<Place> {
-  const result = [];
-  for (const place of eachInstructionValueOperand(instrValue)) {
-    if (state.isDefined(place)) {
-      const kind = state.kind(place);
-      if (kind.kind === ValueKind.Context) {
-        result.push(...kind.context);
-      }
-    }
-  }
-  return result;
 }
 
 export function getFunctionCallSignature(
